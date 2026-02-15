@@ -188,6 +188,69 @@ async function run() {
       },
     );
 
+    // borrow a book
+    app.post(
+      '/borrows/:id',
+      verifyToken,
+      verifyRole('member', 'librarian', 'owner'),
+      checkBookExists(booksCollection),
+      async (req, res) => {
+        // start session
+        const session = client.startSession();
+        try {
+          // start transaction
+          session.startTransaction();
+
+          const { id } = req.params;
+          const bookId = new ObjectId(id);
+          const userId = req.user.userId;
+
+          const alreadyBorrowed = await borrowsCollection.findOne({
+            userId,
+            bookId,
+            status: 'borrowed',
+          });
+
+          if (alreadyBorrowed) {
+            return res.status(400).json({
+              message: 'You already have an active borrow for this book!',
+            });
+          }
+
+          if (!req.book.isDigital) {
+            if (req.book.stock <= 0)
+              throw new Error('This book is out of stock!');
+
+            await booksCollection.updateOne(
+              { _id: bookId },
+              { $inc: { stock: -1 } },
+              { session },
+            );
+          }
+
+          const borrowedRecord = {
+            userId,
+            bookId,
+            bookTitle: req.book.title,
+            borrowDate: new Date(),
+            status: 'borrowed',
+          };
+          await borrowsCollection.insertOne(borrowedRecord, { session });
+
+          // save transaction
+          await session.commitTransaction();
+          res.status(200).json({ message: 'Book borrowed successfully.' });
+        } catch (error) {
+          // if anything failed, undo everything!
+          await session.abortTransaction();
+          res.status(400).json({ message: error.message });
+        } finally {
+          // end the session
+          await session.endSession();
+        }
+      },
+    );
+
     // view a book details
     app.get(
       '/books/:id',
