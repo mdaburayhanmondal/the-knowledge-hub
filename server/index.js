@@ -188,9 +188,6 @@ async function run() {
       },
     );
 
-    // borrow a book
-    
-
     // view a book details
     app.get(
       '/books/:id',
