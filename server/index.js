@@ -241,6 +241,11 @@ async function run() {
 
           // save transaction
           await session.commitTransaction();
+          const cacheKey = `myBorrows_${req.user.userId}`;
+          cache.del(cacheKey);
+          const historyCacheKey = `myHistory_${userId}`;
+          cache.del(historyCacheKey);
+          cache.del('cachedBooks');
           res.status(200).json({ message: 'Book borrowed successfully.' });
         } catch (error) {
           // if anything failed, undo everything!
@@ -295,6 +300,11 @@ async function run() {
           }
           // save transaction
           await session.commitTransaction();
+          const cacheKey = `myBorrows_${req.user.userId}`;
+          cache.del(cacheKey);
+          const historyCacheKey = `myHistory_${userId}`;
+          cache.del(historyCacheKey);
+          cache.del('cachedBooks');
           res.status(200).json({ message: 'Book returned successfully.' });
         } catch (error) {
           // undo transaction
@@ -306,6 +316,95 @@ async function run() {
         }
       },
     );
+
+    // get borrowed books
+    app.get('/my-borrows', verifyToken, async (req, res) => {
+      try {
+        const userId = req.user.userId;
+        const cacheKey = `myBorrows_${userId}`;
+        const cachedData = cache.get(cacheKey);
+        if (cachedData) {
+          return res.status(200).json(cachedData);
+        }
+        const borrowedRecords = await borrowsCollection
+          .aggregate([
+            {
+              $match: {
+                userId: userId,
+                status: 'borrowed',
+              },
+            },
+            {
+              $lookup: {
+                from: 'books',
+                localField: 'bookId',
+                foreignField: '_id',
+                as: 'bookDetails',
+              },
+            },
+            {
+              $unwind: {
+                path: '$bookDetails',
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                borrowDate: 1,
+                title: '$bookDetails.title',
+                author: '$bookDetails.author',
+                genre: '$bookDetails.genre',
+              },
+            },
+          ])
+          .toArray();
+        if (borrowedRecords.length === 0) {
+          return res.status(404).json({ message: 'No borrowed books!' });
+        }
+        cache.set(cacheKey, borrowedRecords, 600);
+        res.send(borrowedRecords);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: 'Failed to load!', error: error.message });
+      }
+    });
+
+    // borrow-return history
+    app.get('/my-history', verifyToken, async (req, res) => {
+      try {
+        const userId = req.user.userId;
+        const cacheKey = `myHistory_${userId}`;
+        const cachedData = cache.get(cacheKey);
+        if (cachedData) {
+          return res.status(200).json(cachedData);
+        }
+
+        const records = await borrowsCollection
+          .aggregate([
+            {
+              $match: { userId: userId },
+            },
+            {
+              $project: {
+                _id: 0,
+                userId: 0,
+              },
+            },
+          ])
+          .toArray();
+
+        if (records.length === 0) {
+          return res.status(404).json({ message: 'No history found!' });
+        }
+        cache.set(cacheKey, records, 600);
+        res.send(records);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: 'Failed to load!', error: error.message });
+      }
+    });
 
     // view a book details
     app.get(
