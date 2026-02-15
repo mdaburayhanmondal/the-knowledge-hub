@@ -2,6 +2,8 @@ require('dotenv').config({ quiet: true });
 const express = require('express');
 const app = express();
 const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -11,6 +13,8 @@ app.use(cors());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const { checkBookExists } = require('./middleware/checkBookExists');
+const verifyToken = require('./middleware/verifyToken');
+const verifyRole = require('./middleware/verifyRole');
 const uri = process.env.MONGODB_URL;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -33,36 +37,98 @@ async function run() {
     const booksCollection = db.collection('books');
     const borrowsCollection = db.collection('borrows');
 
-    // add book
-    app.post('/books', async (req, res) => {
-      const { title, author, genre, stock, isDigital } = req.body;
+    // registration>
+    app.post('/register', async (req, res) => {
       try {
-        const newBook = await booksCollection.insertOne({
-          title,
-          author,
-          genre,
-          stock,
-          isDigital,
-        });
-        res.status(201).json({ message: 'Book added successfully!' });
+        const { name, email, password } = req.body;
+        if (!name || !email || !password) {
+          return res.status(400).json({ message: 'All fields are required' });
+        }
+
+        const user = await usersCollection.findOne({ email });
+        if (user) {
+          return res
+            .status(409)
+            .json({ message: 'User alreday exists! Please log-in.' });
+        }
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = {
+          name,
+          email,
+          password: hashedPassword,
+          role: 'member',
+          createdAt: new Date(),
+        };
+        await usersCollection.insertOne(newUser);
+        res
+          .status(200)
+          .json({ message: `New ${newUser.role} is registered successfully!` });
       } catch (error) {
         res
           .status(500)
-          .json({ message: 'Failed to add book!', error: error.message });
+          .json({ message: 'Failed to register!', error: error.message });
       }
     });
+    // registration!
 
-    // find a book
-    app.get(
-      '/books/:id',
-      checkBookExists(booksCollection),
+    // login>
+    app.post('/login', async (req, res) => {
+      try {
+        const { email, password } = req.body;
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res
+            .status(404)
+            .json({ message: "User doesn't exist! Please register." });
+        }
+        const isPasswordValid = await bcrypt.compare(password, user.password);
+        if (!isPasswordValid) {
+          return res
+            .status(401)
+            .json({ message: 'Wrong credentials! Try again' });
+        }
+        // jwt token
+        const token = jwt.sign(
+          { userId: user._id, role: user.role },
+          process.env.JWT_SECRET,
+          {
+            expiresIn: '2m',
+          },
+        );
+
+        res.status(200).json({
+          message: 'Log-in successful.',
+          user: { name: user.name, role: user.role },
+          token,
+        });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: 'Failed to register!', error: error.message });
+      }
+    });
+    // login!
+
+    // add book
+    app.post(
+      '/books',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
       async (req, res) => {
+        const { title, author, genre, stock, isDigital } = req.body;
         try {
-          res.status(200).json(req.book);
+          const newBook = await booksCollection.insertOne({
+            title,
+            author,
+            genre,
+            stock,
+            isDigital,
+          });
+          res.status(201).json({ message: 'Book added successfully!' });
         } catch (error) {
           res
             .status(500)
-            .json({ message: 'Failed to load book!', error: error.message });
+            .json({ message: 'Failed to add book!', error: error.message });
         }
       },
     );
@@ -70,6 +136,8 @@ async function run() {
     // update a book
     app.put(
       '/books/:id',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
       checkBookExists(booksCollection),
       async (req, res) => {
         try {
@@ -99,6 +167,8 @@ async function run() {
     // delete a book
     app.delete(
       '/books/:id',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
       checkBookExists(booksCollection),
       async (req, res) => {
         try {
@@ -114,6 +184,24 @@ async function run() {
             message: 'Failed to delete book!',
             error: error.message,
           });
+        }
+      },
+    );
+
+    // borrow a book
+    
+
+    // view a book details
+    app.get(
+      '/books/:id',
+      checkBookExists(booksCollection),
+      async (req, res) => {
+        try {
+          res.status(200).json(req.book);
+        } catch (error) {
+          res
+            .status(500)
+            .json({ message: 'Failed to load book!', error: error.message });
         }
       },
     );
