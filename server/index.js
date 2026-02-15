@@ -4,6 +4,8 @@ const app = express();
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const NodeCache = require('node-cache');
+const cache = new NodeCache({ stdTTL: 600 });
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -323,10 +325,15 @@ async function run() {
     // get all books
     app.get('/books', async (req, res) => {
       try {
+        const cachedData = cache.get('cachedBooks');
+        if (cachedData) {
+          return res.status(200).json(cachedData);
+        }
         const books = await booksCollection.find().toArray();
         if (books.length === 0) {
           return res.status(404).json({ message: 'No books!' });
         }
+        cache.set('cachedBooks', books, 600);
         res.status(200).json(books);
       } catch (error) {
         res
