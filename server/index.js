@@ -251,6 +251,60 @@ async function run() {
       },
     );
 
+    // return a book
+    app.patch(
+      '/borrows/return/:id',
+      verifyToken,
+      verifyRole('member', 'librarian', 'owner'),
+      async (req, res) => {
+        // start session
+        const session = client.startSession();
+        try {
+          session.startTransaction();
+          const { id } = req.params;
+
+          const borrowedRecord = await borrowsCollection.findOne(
+            { _id: new ObjectId(id) },
+            { session },
+          );
+          if (!borrowedRecord) throw new Error('Borrow record not found.');
+
+          if (borrowedRecord.status === 'returned') {
+            throw new Error('This book has already been returned.');
+          }
+
+          await borrowsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status: 'returned', returnDate: new Date() } },
+            { session },
+          );
+
+          const book = await booksCollection.findOne(
+            { _id: new ObjectId(borrowedRecord.bookId) },
+            { session },
+          );
+
+          if (book && !book.isDigital) {
+            await booksCollection.updateOne(
+              { _id: book._id },
+              { $inc: { stock: 1 } },
+              { session },
+            );
+          }
+          // save transaction
+          await session.commitTransaction();
+          res.status(200).json({ message: 'Book returned successfully.' });
+        } catch (error) {
+          // undo transaction
+          await session.abortTransaction();
+          res.status(400).json({ message: error.message });
+        } finally {
+          // end transaction
+          await session.endSession();
+        }
+      },
+    );
+
     // view a book details
     app.get(
       '/books/:id',
