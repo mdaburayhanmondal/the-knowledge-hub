@@ -753,6 +753,44 @@ async function run() {
       }
     });
 
+    // clear fines route
+    app.patch(
+      '/pay-fines/:userId',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const { userId } = req.params;
+
+          const result = await borrowsCollection.updateMany(
+            {
+              userId: userId,
+              status: 'borrowed',
+              unpaidFine: { $gt: 0 },
+            },
+            {
+              $set: { unpaidFine: 0 },
+            },
+          );
+
+          if (result.matchedCount === 0) {
+            return res
+              .status(404)
+              .json({ message: 'No unpaid fines found for this user.' });
+          }
+
+          res.status(200).json({
+            message: `Successfully cleared fines for ${result.modifiedCount} records.`,
+            clearedCount: result.modifiedCount,
+          });
+        } catch (error) {
+          res
+            .status(500)
+            .json({ message: 'Payment failed!', error: error.message });
+        }
+      },
+    );
+
     // get a book details
     app.get(
       '/books/:id',
