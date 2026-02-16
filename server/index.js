@@ -711,6 +711,48 @@ async function run() {
       }
     });
 
+    // member stats
+    app.get('/member-stats/:userId', verifyToken, async (req, res) => {
+      try {
+        const { userId } = req.params;
+
+        if (
+          req.user.role === 'member' &&
+          req.user.userId !== userId.toString()
+        ) {
+          console.log(req.user.role, req.user._id, req.user.id, userId);
+          return res.status(403).json({ message: 'Access denied.' });
+        }
+
+        const stats = await borrowsCollection
+          .aggregate([
+            { $match: { userId: userId } },
+            {
+              $group: {
+                _id: '$userId',
+                totalBooksBorrowed: { $sum: 1 },
+                activeBorrows: {
+                  $sum: { $cond: [{ $eq: ['$status', 'borrowed'] }, 1, 0] },
+                },
+                unpaidFines: { $sum: { $ifNull: ['$unpaidFine', 0] } },
+                totalRenewals: { $sum: { $cond: ['$isRenewed', 1, 0] } },
+              },
+            },
+          ])
+          .toArray();
+
+        res.status(200).json(
+          stats[0] || {
+            totalBooksBorrowed: 0,
+            activeBorrows: 0,
+            unpaidFines: 0,
+          },
+        );
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // get a book details
     app.get(
       '/books/:id',
