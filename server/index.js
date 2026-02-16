@@ -124,14 +124,17 @@ async function run() {
       verifyToken,
       verifyRole('librarian', 'owner'),
       async (req, res) => {
-        const { title, author, genre, stock } = req.body;
+        const { title, author, genre, stock, image, description } = req.body;
         try {
           const newBook = await booksCollection.insertOne({
             title,
             author,
             genre,
             stock,
+            image,
+            description,
           });
+          cache.del('cachedBooksDefault');
           res.status(201).json({ message: 'Book added successfully!' });
         } catch (error) {
           res
@@ -872,6 +875,7 @@ async function run() {
         }
       },
     );
+    
     // get a book details
     app.get(
       '/books/:id',
