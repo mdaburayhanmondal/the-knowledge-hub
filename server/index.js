@@ -406,7 +406,72 @@ async function run() {
       }
     });
 
-    // view a book details
+    // get overdue books
+    app.get(
+      '/borrows/overdue',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const daysAllowed = 14;
+          const thresholdDate = new Date();
+          thresholdDate.setDate(thresholdDate.getDate() - daysAllowed);
+
+          const overdueBooks = await borrowsCollection
+            .aggregate([
+              {
+                $match: {
+                  status: 'borrowed',
+                  borrowDate: { $lt: thresholdDate },
+                },
+              },
+              {
+                $lookup: {
+                  from: 'users',
+                  let: { userIdStr: '$userId' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ['$_id', { $toObjectId: '$$userIdStr' }],
+                        },
+                      },
+                    },
+                  ],
+                  as: 'userDetails',
+                },
+              },
+              { $unwind: '$userDetails' },
+              {
+                $project: {
+                  bookTitle: 1,
+                  borrowDate: 1,
+                  userName: '$userDetails.name',
+                  userEmail: '$userDetails.email',
+                  daysOverdue: {
+                    $floor: {
+                      $divide: [
+                        { $subtract: [new Date(), '$borrowDate'] },
+                        1000 * 60 * 60 * 24, // Convert milliseconds to days
+                      ],
+                    },
+                  },
+                },
+              },
+            ])
+            .toArray();
+
+          res.status(200).json(overdueBooks);
+        } catch (error) {
+          res.status(500).json({
+            message: 'Error fetching overdue books!',
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // get a book details
     app.get(
       '/books/:id',
       checkBookExists(booksCollection),
@@ -424,20 +489,50 @@ async function run() {
     // get all books
     app.get('/books', async (req, res) => {
       try {
-        const cachedData = cache.get('cachedBooks');
-        if (cachedData) {
-          return res.status(200).json(cachedData);
+        const { search, limit, page, genre, author, isDigital } = req.query;
+
+        let query = {};
+        if (search) {
+          query.$or = [
+            { title: { $regex: search, $options: 'i' } },
+            { description: { $regex: search, $options: 'i' } },
+          ];
         }
-        const books = await booksCollection.find().toArray();
-        if (books.length === 0) {
-          return res.status(404).json({ message: 'No books!' });
+        if (genre) query.genre = genre;
+        if (author) query.author = { $regex: author, $options: 'i' };
+        if (isDigital !== undefined) query.isDigital = isDigital === 'true';
+
+        const p = parseInt(page) || 1;
+        const l = parseInt(limit) || 10;
+        const skip = (p - 1) * l;
+
+        const isDefaultView = !search && !genre && !author && p === 1;
+        if (isDefaultView) {
+          const cachedData = cache.get('cachedBooksDefault');
+          if (cachedData) return res.status(200).json(cachedData);
         }
-        cache.set('cachedBooks', books, 600);
-        res.status(200).json(books);
+
+        const [books, totalBooks] = await Promise.all([
+          booksCollection.find(query).skip(skip).limit(l).toArray(),
+          booksCollection.countDocuments(query),
+        ]);
+
+        const result = {
+          books,
+          pagination: {
+            totalBooks,
+            totalPages: Math.ceil(totalBooks / l),
+            currentPage: p,
+          },
+        };
+
+        if (isDefaultView) cache.set('cachedBooksDefault', result, 600);
+
+        res.status(200).json(result);
       } catch (error) {
         res
           .status(500)
-          .json({ message: 'Failed to load books!', error: error.message });
+          .json({ message: 'Error loading books', error: error.message });
       }
     });
     // ====================!
