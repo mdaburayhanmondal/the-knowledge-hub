@@ -6,6 +6,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const NodeCache = require('node-cache');
 const cache = new NodeCache({ stdTTL: 600 });
+const nodemailer = require('nodemailer');
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -560,6 +561,96 @@ async function run() {
         } catch (error) {
           res.status(500).json({
             message: 'Error fetching stats!',
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // transporter
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    // remind member
+    app.post(
+      '/borrows/remind/:id',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+
+          const record = await borrowsCollection
+            .aggregate([
+              { $match: { _id: new ObjectId(id) } },
+              {
+                $lookup: {
+                  from: 'users',
+                  let: { userIdStr: '$userId' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ['$_id', { $toObjectId: '$$userIdStr' }],
+                        },
+                      },
+                    },
+                  ],
+                  as: 'userDetails',
+                },
+              },
+              { $unwind: '$userDetails' },
+              {
+                $project: {
+                  bookTitle: 1,
+                  userEmail: '$userDetails.email',
+                  userName: '$userDetails.name',
+                  status: 1,
+                },
+              },
+            ])
+            .toArray();
+
+          if (record.length === 0) {
+            return res.status(404).json({ message: 'Record not found!' });
+          }
+
+          const { userEmail, userName, bookTitle, status } = record[0];
+
+          if (status !== 'borrowed') {
+            return res
+              .status(400)
+              .json({ message: 'Book is already returned!' });
+          }
+
+          // prepare Email
+          const mailOptions = {
+            from: `"The Knowledge Hub" <${process.env.EMAIL_USER}>`,
+            to: userEmail,
+            subject: '📚 Library Return Reminder',
+            html: `
+          <div style="font-family: sans-serif; line-height: 1.6;">
+            <h2>Hello ${userName},</h2>
+            <p>This is a friendly reminder to return the book: <strong>"${bookTitle}"</strong>.</p>
+            <p>Please return it to the library soon to avoid increasing overdue fines.</p>
+            <br />
+            <p>Best regards,<br />The Knowledge Hub Team</p>
+          </div>
+        `,
+          };
+
+          // send Email
+          await transporter.sendMail(mailOptions);
+
+          res.status(200).json({ message: `Reminder sent to ${userEmail}!` });
+        } catch (error) {
+          res.status(500).json({
+            message: 'Failed to send reminder!',
             error: error.message,
           });
         }
