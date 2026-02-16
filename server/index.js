@@ -448,14 +448,26 @@ async function run() {
                   borrowDate: 1,
                   userName: '$userDetails.name',
                   userEmail: '$userDetails.email',
-                  daysOverdue: {
+                  totalDaysOut: {
                     $floor: {
                       $divide: [
                         { $subtract: [new Date(), '$borrowDate'] },
-                        1000 * 60 * 60 * 24, // Convert milliseconds to days
+                        1000 * 60 * 60 * 24,
                       ],
                     },
                   },
+                },
+              },
+              {
+                $addFields: {
+                  fineDays: {
+                    $max: [0, { $subtract: ['$totalDaysOut', 14] }],
+                  },
+                },
+              },
+              {
+                $addFields: {
+                  totalFine: { $multiply: ['$fineDays', 10] },
                 },
               },
             ])
@@ -464,7 +476,7 @@ async function run() {
           res.status(200).json(overdueBooks);
         } catch (error) {
           res.status(500).json({
-            message: 'Error fetching overdue books!',
+            message: 'Error fetching overdue books',
             error: error.message,
           });
         }
