@@ -656,6 +656,62 @@ async function run() {
       },
     );
 
+    // book renew
+    app.patch('/borrows/renew/:id', verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const record = await borrowsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!record || record.status !== 'borrowed') {
+          return res.status(400).json({ message: 'Invalid renewal request.' });
+        }
+
+        const book = await booksCollection.findOne({
+          _id: new ObjectId(record.bookId),
+        });
+
+        if (!book || book.stock <= 2) {
+          return res.status(400).json({
+            message:
+              'High demand! This book cannot be renewed. Please return it so others can read.',
+          });
+        }
+
+        const borrowDate = new Date(record.borrowDate);
+        const today = new Date();
+        const diffTime = Math.abs(today - borrowDate);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        let currentFine = 0;
+        if (diffDays > 14) {
+          currentFine = (diffDays - 14) * 10;
+        }
+
+        const updateDoc = {
+          $set: {
+            borrowDate: new Date(),
+            reminder12Sent: false,
+            reminder13Sent: false,
+            isRenewed: true,
+          },
+          $inc: {
+            unpaidFine: currentFine,
+          },
+        };
+
+        await borrowsCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+
+        res.status(200).json({
+          message: 'Renewed successfully!',
+          fineAdded: currentFine,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     // get a book details
     app.get(
       '/books/:id',
