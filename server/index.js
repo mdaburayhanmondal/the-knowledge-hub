@@ -11,7 +11,12 @@ const cron = require('node-cron');
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: ['http://localhost:5173', 'https://theknowledgehub.netlfiy.app'],
+    credentials: true,
+  }),
+);
 
 // ========================>
 
@@ -224,13 +229,12 @@ async function run() {
 
           if (req.book.stock <= 0) {
             throw new Error('This book is out of stock!');
-
-            await booksCollection.updateOne(
-              { _id: bookId },
-              { $inc: { stock: -1 } },
-              { session },
-            );
           }
+          await booksCollection.updateOne(
+            { _id: bookId },
+            { $inc: { stock: -1 } },
+            { session },
+          );
 
           const borrowedRecord = {
             userId,
