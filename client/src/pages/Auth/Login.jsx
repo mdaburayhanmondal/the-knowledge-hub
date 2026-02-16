@@ -24,6 +24,7 @@ const Login = () => {
       const response = await api.post('/login', { email, password });
       const { token, user: userData } = response.data;
       login(userData, token);
+      console.log('Login successful!');
       if (userData.role === 'librarian' || userData.role === 'owner') {
         navigate('/admin/stats');
       } else {
@@ -51,6 +52,9 @@ const Login = () => {
       <h1 className="text-3xl text-yellow-900 font-extrabold italic underline-0 hover:underline hover:underline-offset-8 decoration-4 decoration-wavy transition-all duration-300 ease-in cursor-default">
         Log-in
       </h1>
+      {error && (
+        <div className="bg-red-100 text-red-700 p-3 rounded mb-4">{error}</div>
+      )}
       <form
         onSubmit={formHandler}
         className="w-full max-w-2xl mx-auto flex flex-col items-start justify-center gap-y-6"
