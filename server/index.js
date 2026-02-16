@@ -259,63 +259,62 @@ async function run() {
     );
 
     // return a book
-    app.patch(
-      '/borrows/return/:id',
-      verifyToken,
-      verifyRole('member', 'librarian', 'owner'),
-      async (req, res) => {
-        // start session
-        const session = client.startSession();
-        try {
-          session.startTransaction();
-          const { id } = req.params;
+    app.patch('/borrows/return/:id', verifyToken, async (req, res) => {
+      try {
+        const { id } = req.params;
 
-          const borrowedRecord = await borrowsCollection.findOne(
-            { _id: new ObjectId(id) },
-            { session },
-          );
-          if (!borrowedRecord) throw new Error('Borrow record not found.');
-
-          if (borrowedRecord.status === 'returned') {
-            throw new Error('This book has already been returned.');
-          }
-
-          await borrowsCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: { status: 'returned', returnDate: new Date() } },
-            { session },
-          );
-
-          const book = await booksCollection.findOne(
-            { _id: new ObjectId(borrowedRecord.bookId) },
-            { session },
-          );
-
-          if (book) {
-            await booksCollection.updateOne(
-              { _id: book._id },
-              { $inc: { stock: 1 } },
-              { session },
-            );
-          }
-          // save transaction
-          await session.commitTransaction();
-          const cacheKey = `myBorrows_${req.user.userId}`;
-          cache.del(cacheKey);
-          const historyCacheKey = `myHistory_${userId}`;
-          cache.del(historyCacheKey);
-          cache.del('cachedBooks');
-          res.status(200).json({ message: 'Book returned successfully.' });
-        } catch (error) {
-          // undo transaction
-          await session.abortTransaction();
-          res.status(400).json({ message: error.message });
-        } finally {
-          // end transaction
-          await session.endSession();
+        // 1. Find the borrow record
+        const record = await borrowsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!record || record.status !== 'borrowed') {
+          return res
+            .status(400)
+            .json({ message: 'This book was already returned.' });
         }
-      },
-    );
+
+        // 2. Calculate any NEW fines accumulated since the last renewal/borrow
+        const lastDate = new Date(record.borrowDate);
+        const today = new Date();
+        const diffDays = Math.ceil(
+          Math.abs(today - lastDate) / (1000 * 60 * 60 * 24),
+        );
+
+        let newFine = 0;
+        if (diffDays > 14) {
+          newFine = (diffDays - 14) * 10;
+        }
+
+        const totalFinalFine = (record.unpaidFine || 0) + newFine;
+
+        // 3. Update the Borrow Record
+        await borrowsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: 'returned',
+              returnDate: new Date(),
+              totalFineAtReturn: totalFinalFine, // Record the total debt
+            },
+          },
+        );
+
+        // 4. Increment the Book Stock
+        await booksCollection.updateOne(
+          { _id: new ObjectId(record.bookId) },
+          { $inc: { stock: 1 } },
+        );
+
+        cache.del('cachedBooksDefault');
+
+        res.status(200).json({
+          message: 'Book returned successfully!',
+          totalFineToPay: totalFinalFine,
+        });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
 
     // get borrowed books
     app.get('/my-borrows', verifyToken, async (req, res) => {
@@ -775,7 +774,6 @@ async function run() {
           .json({ message: 'Error loading books', error: error.message });
       }
     });
-    // ====================!
 
     // reminder automation
     cron.schedule(
@@ -914,6 +912,8 @@ async function run() {
         timezone: 'Asia/Dhaka', // 🔥 VERY IMPORTANT
       },
     );
+
+    // ====================!
 
     // Send a ping to confirm a successful connection
     await client.db('admin').command({ ping: 1 });
