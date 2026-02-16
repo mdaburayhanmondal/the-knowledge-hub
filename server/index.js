@@ -157,6 +157,7 @@ async function run() {
               .json({ message: 'No changes made to the book.' });
           }
 
+          cache.del('cachedBooksDefault');
           res.status(200).json({ message: 'Book updated successfully!' });
         } catch (error) {
           res.status(500).json({
@@ -179,6 +180,7 @@ async function run() {
           const deletedBook = await booksCollection.deleteOne({
             _id: new ObjectId(id),
           });
+          cache.del('cachedBooksDefault');
           res
             .status(200)
             .json({ message: 'The Book is deleted successfully!' });
