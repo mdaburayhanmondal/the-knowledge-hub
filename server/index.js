@@ -753,40 +753,58 @@ async function run() {
       }
     });
 
-    // clear fines route
+    // pay and clear fines route
     app.patch(
       '/pay-fines/:userId',
       verifyToken,
-      verifyRole('librarian', 'owner'),
+      verifyRole('librarian'),
       async (req, res) => {
         try {
           const { userId } = req.params;
+          const today = new Date();
 
-          const result = await borrowsCollection.updateMany(
-            {
-              userId: userId,
+          const activeBorrows = await borrowsCollection
+            .find({
+              userId,
               status: 'borrowed',
-              unpaidFine: { $gt: 0 },
-            },
-            {
-              $set: { unpaidFine: 0 },
-            },
-          );
+            })
+            .toArray();
 
-          if (result.matchedCount === 0) {
+          if (activeBorrows.length === 0) {
             return res
               .status(404)
-              .json({ message: 'No unpaid fines found for this user.' });
+              .json({ message: 'No active borrows found.' });
           }
 
+          const bulkOps = activeBorrows.map((record) => {
+            const diffDays = Math.ceil(
+              Math.abs(today - new Date(record.borrowDate)) /
+                (1000 * 60 * 60 * 24),
+            );
+            const liveFine = diffDays > 14 ? (diffDays - 14) * 10 : 0;
+
+            return {
+              updateOne: {
+                filter: { _id: record._id },
+                update: {
+                  $set: {
+                    unpaidFine: 0,
+                    borrowDate: today,
+                    reminder12Sent: false,
+                    reminder13Sent: false,
+                  },
+                },
+              },
+            };
+          });
+
+          const result = await borrowsCollection.bulkWrite(bulkOps);
+
           res.status(200).json({
-            message: `Successfully cleared fines for ${result.modifiedCount} records.`,
-            clearedCount: result.modifiedCount,
+            message: `Fines cleared and clocks reset for ${result.modifiedCount} books.`,
           });
         } catch (error) {
-          res
-            .status(500)
-            .json({ message: 'Payment failed!', error: error.message });
+          res.status(500).json({ error: error.message });
         }
       },
     );
