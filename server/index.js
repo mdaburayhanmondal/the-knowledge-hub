@@ -809,6 +809,63 @@ async function run() {
       },
     );
 
+    // sync all fines
+    app.patch(
+      '/librarian/sync-fines',
+      verifyToken,
+      verifyRole('librarian'),
+      async (req, res) => {
+        try {
+          const today = new Date();
+
+          const overdueRecords = await borrowsCollection
+            .find({
+              status: 'borrowed',
+              borrowDate: {
+                $lt: new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000),
+              },
+            })
+            .toArray();
+
+          if (overdueRecords.length === 0) {
+            return res
+              .status(200)
+              .json({ message: 'No overdue records found to sync.' });
+          }
+
+          const bulkOps = overdueRecords.map((record) => {
+            const borrowDate = new Date(record.borrowDate);
+            const diffTime = Math.abs(today - borrowDate);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const liveFine = (diffDays - 14) * 10;
+
+            return {
+              updateOne: {
+                filter: { _id: record._id },
+                update: {
+                  $set: {
+                    unpaidFine: liveFine,
+                    lastSyncedAt: today,
+                  },
+                },
+              },
+            };
+          });
+
+          const result = await borrowsCollection.bulkWrite(bulkOps);
+
+          res.status(200).json({
+            message: `Successfully synced ${result.modifiedCount} records.`,
+            details: result,
+          });
+        } catch (error) {
+          console.error('BulkWrite Error:', error);
+          res
+            .status(500)
+            .json({ error: 'Sync failed', details: error.message });
+        }
+      },
+    );
     // get a book details
     app.get(
       '/books/:id',
