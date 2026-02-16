@@ -476,7 +476,90 @@ async function run() {
           res.status(200).json(overdueBooks);
         } catch (error) {
           res.status(500).json({
-            message: 'Error fetching overdue books',
+            message: 'Error fetching overdue books!',
+            error: error.message,
+          });
+        }
+      },
+    );
+
+    // get admin stats
+    app.get(
+      '/admin/stats',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const thresholdDate = new Date();
+          thresholdDate.setDate(thresholdDate.getDate() - 14);
+
+          const [genreStats, fineStats, totalCounts] = await Promise.all([
+            booksCollection
+              .aggregate([
+                { $group: { _id: '$genre', totalCount: { $sum: 1 } } },
+                { $sort: { totalCount: -1 } },
+                { $project: { _id: 0, genre: '$_id', totalCount: 1 } },
+              ])
+              .toArray(),
+
+            borrowsCollection
+              .aggregate([
+                {
+                  $match: {
+                    status: 'borrowed',
+                    borrowDate: { $lt: thresholdDate },
+                  },
+                },
+                {
+                  $project: {
+                    totalDaysOut: {
+                      $floor: {
+                        $divide: [
+                          { $subtract: [new Date(), '$borrowDate'] },
+                          1000 * 60 * 60 * 24,
+                        ],
+                      },
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    fineAmount: {
+                      $multiply: [
+                        { $max: [0, { $subtract: ['$totalDaysOut', 14] }] },
+                        10,
+                      ],
+                    },
+                  },
+                },
+                {
+                  $group: {
+                    _id: null,
+                    totalLibraryFines: { $sum: '$fineAmount' },
+                    averageFine: { $avg: '$fineAmount' },
+                  },
+                },
+              ])
+              .toArray(),
+
+            Promise.all([
+              booksCollection.countDocuments(),
+              usersCollection.countDocuments({ role: 'member' }),
+            ]),
+          ]);
+
+          res.status(200).json({
+            summary: {
+              totalBooks: totalCounts[0],
+              totalMembers: totalCounts[1],
+              totalFinesPending: fineStats[0]?.totalLibraryFines || 0,
+              averageFine: fineStats[0]?.averageFine || 0,
+            },
+            genres: genreStats,
+          });
+        } catch (error) {
+          res.status(500).json({
+            message: 'Error fetching stats!',
             error: error.message,
           });
         }
