@@ -119,14 +119,13 @@ async function run() {
       verifyToken,
       verifyRole('librarian', 'owner'),
       async (req, res) => {
-        const { title, author, genre, stock, isDigital } = req.body;
+        const { title, author, genre, stock } = req.body;
         try {
           const newBook = await booksCollection.insertOne({
             title,
             author,
             genre,
             stock,
-            isDigital,
           });
           res.status(201).json({ message: 'Book added successfully!' });
         } catch (error) {
@@ -221,9 +220,8 @@ async function run() {
             });
           }
 
-          if (!req.book.isDigital) {
-            if (req.book.stock <= 0)
-              throw new Error('This book is out of stock!');
+          if (req.book.stock <= 0) {
+            throw new Error('This book is out of stock!');
 
             await booksCollection.updateOne(
               { _id: bookId },
@@ -293,7 +291,7 @@ async function run() {
             { session },
           );
 
-          if (book && !book.isDigital) {
+          if (book) {
             await booksCollection.updateOne(
               { _id: book._id },
               { $inc: { stock: 1 } },
@@ -676,7 +674,7 @@ async function run() {
     // get all books
     app.get('/books', async (req, res) => {
       try {
-        const { search, limit, page, genre, author, isDigital } = req.query;
+        const { search, limit, page, genre, author } = req.query;
 
         let query = {};
         if (search) {
@@ -687,7 +685,6 @@ async function run() {
         }
         if (genre) query.genre = genre;
         if (author) query.author = { $regex: author, $options: 'i' };
-        if (isDigital !== undefined) query.isDigital = isDigital === 'true';
 
         const p = parseInt(page) || 1;
         const l = parseInt(limit) || 10;
