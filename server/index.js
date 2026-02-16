@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const NodeCache = require('node-cache');
 const cache = new NodeCache({ stdTTL: 600 });
 const nodemailer = require('nodemailer');
+const cron = require('node-cron');
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -657,8 +658,6 @@ async function run() {
       },
     );
 
-    
-
     // get a book details
     app.get(
       '/books/:id',
@@ -724,6 +723,144 @@ async function run() {
       }
     });
     // ====================!
+
+    // reminder automation
+    cron.schedule(
+      '0 0 * * *', // Every day at midnight
+      async () => {
+        console.log('📚 Running scheduled library reminders...');
+
+        try {
+          const now = new Date();
+
+          const getTargetWindow = (daysBack) => {
+            const start = new Date();
+            start.setDate(start.getDate() - daysBack);
+            start.setHours(0, 0, 0, 0);
+
+            const end = new Date();
+            end.setDate(end.getDate() - daysBack);
+            end.setHours(23, 59, 59, 999);
+
+            return { start, end };
+          };
+
+          const day12 = getTargetWindow(12);
+          const day13 = getTargetWindow(13);
+
+          const reminders = await borrowsCollection
+            .aggregate([
+              {
+                $match: {
+                  status: 'borrowed',
+                  $or: [
+                    {
+                      borrowDate: {
+                        $gte: day12.start,
+                        $lte: day12.end,
+                      },
+                      reminder12Sent: { $ne: true },
+                    },
+                    {
+                      borrowDate: {
+                        $gte: day13.start,
+                        $lte: day13.end,
+                      },
+                      reminder13Sent: { $ne: true },
+                    },
+                  ],
+                },
+              },
+              {
+                $lookup: {
+                  from: 'users',
+                  let: { userIdStr: '$userId' },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ['$_id', { $toObjectId: '$$userIdStr' }],
+                        },
+                      },
+                    },
+                  ],
+                  as: 'user',
+                },
+              },
+              { $unwind: '$user' },
+            ])
+            .toArray();
+
+          for (const record of reminders) {
+            const daysPassed = Math.floor(
+              (now - new Date(record.borrowDate)) / (1000 * 60 * 60 * 24),
+            );
+
+            let subject = '';
+            let warning = '';
+            let updateField = {};
+
+            // 🔔 12 Day Reminder
+            if (daysPassed === 12 && !record.reminder12Sent) {
+              subject = '📝 2 Days Left: Return your book';
+              warning = 'You have 2 days left before overdue fines begin.';
+
+              updateField = { reminder12Sent: true };
+            }
+
+            // ⚠️ 13 Day Final Reminder
+            if (daysPassed === 13 && !record.reminder13Sent) {
+              subject = '⚠️ Final Notice: Book Due Tomorrow';
+              warning =
+                'Tomorrow is your last day! 10 Taka daily fine starts after 24 hours.';
+
+              updateField = { reminder13Sent: true };
+            }
+
+            // If no valid stage → skip
+            if (!subject) continue;
+
+            console.log(`📧 Sending reminder to ${record.user.email}`);
+
+            await transporter.sendMail({
+              from: `"The Knowledge Hub" <${process.env.EMAIL_USER}>`,
+              to: record.user.email,
+              subject,
+              html: `
+            <div style="font-family: Arial, sans-serif; border: 1px solid #ddd; padding: 20px; border-radius: 10px;">
+              <h2 style="color: #2c3e50;">The Knowledge Hub</h2>
+              <p>Hello <strong>${record.user.name}</strong>,</p>
+              <p>This is an automated reminder for your borrowed book: 
+              <strong>"${record.bookTitle}"</strong>.</p>
+
+              <p style="background: #fff3cd; padding: 10px; border-left: 5px solid #ffecb5;">
+                ${warning}
+              </p>
+
+              <p>Please visit the library desk to return or renew your book.</p>
+
+              <hr />
+              <small>This is an automated message from The Knowledge Hub Library System.</small>
+            </div>
+          `,
+            });
+
+            // ✅ Mark reminder as sent
+            await borrowsCollection.updateOne(
+              { _id: record._id },
+              { $set: updateField },
+            );
+          }
+
+          console.log('✅ Reminder job completed.');
+        } catch (error) {
+          console.error('❌ Cron Error:', error);
+        }
+      },
+      {
+        timezone: 'Asia/Dhaka', // 🔥 VERY IMPORTANT
+      },
+    );
 
     // Send a ping to confirm a successful connection
     await client.db('admin').command({ ping: 1 });
