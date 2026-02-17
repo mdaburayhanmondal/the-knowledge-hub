@@ -2,7 +2,8 @@ import axios from 'axios';
 
 // DRY Base URL
 const api = axios.create({
-  baseURL: import.meta.env.VITE_BASE_URL,
+  baseURL: import.meta.env.VITE_BASE_URL || 'http://localhost:3000',
+  withCredentials: true,
 });
 
 // REQUEST INTERCEPTOR: Runs automatically before every API call
