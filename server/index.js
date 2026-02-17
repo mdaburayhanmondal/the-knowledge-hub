@@ -843,6 +843,78 @@ async function run() {
       },
     );
 
+    // user lookup bridge for librarian dashboard
+    app.get(
+      '/librarian/lookup',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const { email } = req.query;
+          if (!email)
+            return res.status(400).json({ message: 'Email is required' });
+
+          // 1. Find the User
+          const user = await usersCollection.findOne({ email: email });
+          if (!user) {
+            return res.status(404).json({ message: 'User not found!' });
+          }
+
+          // 2. Find Active Borrows for this user
+          const activeBorrows = await borrowsCollection
+            .aggregate([
+              { $match: { userId: user._id.toString(), status: 'borrowed' } },
+              {
+                $lookup: {
+                  from: 'books',
+                  localField: 'bookId',
+                  foreignField: '_id',
+                  as: 'bookDetails',
+                },
+              },
+              { $unwind: '$bookDetails' },
+              {
+                $project: {
+                  bookTitle: '$bookDetails.title',
+                  bookImage: '$bookDetails.image',
+                  borrowDate: 1,
+                  fine: '$unpaidFine',
+                },
+              },
+            ])
+            .toArray();
+
+          // 3. Calculate Total Fine Logic (Live calculation)
+          const today = new Date();
+          let totalFine = 0;
+
+          activeBorrows.forEach((record) => {
+            // Existing unpaid fine
+            totalFine += record.fine || 0;
+
+            // Plus any NEW overdue fines since last update
+            const diffDays = Math.ceil(
+              Math.abs(today - new Date(record.borrowDate)) /
+                (1000 * 60 * 60 * 24),
+            );
+            if (diffDays > 14) {
+              totalFine += (diffDays - 14) * 10;
+            }
+          });
+
+          res.status(200).json({
+            userId: user._id,
+            name: user.name,
+            email: user.email,
+            totalFine,
+            activeBorrows,
+          });
+        } catch (error) {
+          res.status(500).json({ error: error.message });
+        }
+      },
+    );
+
     // get a book details
     app.get(
       '/books/:id',
