@@ -2,6 +2,7 @@ import { Outlet } from 'react-router';
 import './App.css';
 import Navbar from './components/Navbar';
 import { AuthProvider } from './contexts/AuthContext';
+import Footer from './components/Footer';
 
 function App() {
   return (
@@ -13,7 +14,7 @@ function App() {
         <main className="min-h-[90vh]">
           <Outlet />
         </main>
-        <footer className="min-h-fit">Footer</footer>
+        <Footer />
       </AuthProvider>
     </>
   );
