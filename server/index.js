@@ -854,13 +854,11 @@ async function run() {
           if (!email)
             return res.status(400).json({ message: 'Email is required' });
 
-          // 1. Find the User
           const user = await usersCollection.findOne({ email: email });
           if (!user) {
             return res.status(404).json({ message: 'User not found!' });
           }
 
-          // 2. Find Active Borrows for this user
           const activeBorrows = await borrowsCollection
             .aggregate([
               { $match: { userId: user._id.toString(), status: 'borrowed' } },
@@ -884,15 +882,12 @@ async function run() {
             ])
             .toArray();
 
-          // 3. Calculate Total Fine Logic (Live calculation)
           const today = new Date();
           let totalFine = 0;
 
           activeBorrows.forEach((record) => {
-            // Existing unpaid fine
             totalFine += record.fine || 0;
 
-            // Plus any NEW overdue fines since last update
             const diffDays = Math.ceil(
               Math.abs(today - new Date(record.borrowDate)) /
                 (1000 * 60 * 60 * 24),
