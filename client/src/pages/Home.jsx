@@ -54,6 +54,8 @@ const Home = () => {
           book._id === bookId ? { ...book, stock: book.stock - 1 } : book,
         ),
       );
+
+      setBorrowedBookIds((prev) => [...prev, bookId]);
     } catch (err) {
       alert(err.response?.data?.message || 'Failed to borrow book.');
     }
