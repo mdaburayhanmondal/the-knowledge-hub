@@ -107,7 +107,7 @@ async function run() {
 
         res.status(200).json({
           message: 'Log-in successful.',
-          user: { name: user.name, role: user.role },
+          user: { name: user.name, role: user.role, userId: user._id },
           token,
         });
       } catch (error) {
@@ -267,7 +267,7 @@ async function run() {
       },
     );
 
-    // return a book (only librarian)
+    // return a book (librarian)
     app.patch(
       '/borrows/return/:id',
       verifyToken,
@@ -276,53 +276,64 @@ async function run() {
         try {
           const { id } = req.params;
 
-          // 1. Find the borrow record
           const record = await borrowsCollection.findOne({
             _id: new ObjectId(id),
           });
+
           if (!record || record.status !== 'borrowed') {
             return res
               .status(400)
               .json({ message: 'This book was already returned.' });
           }
 
-          // 2. Calculate any NEW fines accumulated since the last renewal/borrow
-          const lastDate = new Date(record.borrowDate);
-          const today = new Date();
+          // 1. Calculate CURRENT Period Fine
+          const borrowDate = new Date(record.borrowDate);
+          const returnDate = new Date();
           const diffDays = Math.ceil(
-            Math.abs(today - lastDate) / (1000 * 60 * 60 * 24),
+            Math.abs(returnDate - borrowDate) / (1000 * 60 * 60 * 24),
           );
 
-          let newFine = 0;
+          let currentPeriodFine = 0;
           if (diffDays > 14) {
-            newFine = (diffDays - 14) * 10;
+            currentPeriodFine = (diffDays - 14) * 10;
           }
 
-          const totalFinalFine = (record.unpaidFine || 0) + newFine;
+          // 2. Add to ARCHIVED Fine
+          // If they owe 200 from before, and 0 from now -> Total 200.
+          // If they owe 200 from before, and 20 from now -> Total 220.
+          const historicDebt = record.archivedFine || 0;
+          const finalTotalFine = historicDebt + currentPeriodFine;
 
-          // 3. Update the Borrow Record
+          // 3. Update Record
           await borrowsCollection.updateOne(
             { _id: new ObjectId(id) },
             {
               $set: {
                 status: 'returned',
-                returnDate: new Date(),
-                totalFineAtReturn: totalFinalFine, // Record the total debt
+                returnDate: returnDate,
+                totalFineAtReturn: finalTotalFine,
+                unpaidFine: finalTotalFine, // This is what they must pay
+                // Note: We keep archivedFine as is, or you can leave it.
+                // The 'unpaidFine' is the source of truth for payment now.
               },
             },
           );
 
-          // 4. Increment the Book Stock
+          // 4. Update Stock
           await booksCollection.updateOne(
             { _id: new ObjectId(record.bookId) },
             { $inc: { stock: 1 } },
           );
 
+          // 5. Clear Caches
           cache.del('cachedBooksDefault');
+          if (record.userId) {
+            cache.del(`myBorrows_${record.userId}`);
+          }
 
           res.status(200).json({
             message: 'Book returned successfully!',
-            totalFineToPay: totalFinalFine,
+            totalFineToPay: finalTotalFine,
           });
         } catch (error) {
           res.status(500).json({ error: error.message });
@@ -330,7 +341,7 @@ async function run() {
       },
     );
 
-    // user's borrow-return
+    // user's borrow-return-renue
     app.get('/borrows', verifyToken, async (req, res) => {
       try {
         const userId = req.user.userId;
@@ -356,6 +367,7 @@ async function run() {
                 returnDate: 1,
                 status: 1,
                 fine: '$unpaidFine',
+                bookId: 1,
                 bookTitle: '$bookDetails.title',
                 bookAuthor: '$bookDetails.author',
                 bookImage: '$bookDetails.image',
@@ -458,9 +470,6 @@ async function run() {
       verifyRole('librarian', 'owner'),
       async (req, res) => {
         try {
-          const thresholdDate = new Date();
-          thresholdDate.setDate(thresholdDate.getDate() - 14);
-
           const [genreStats, fineStats, totalCounts] = await Promise.all([
             booksCollection
               .aggregate([
@@ -475,13 +484,14 @@ async function run() {
                 {
                   $match: {
                     status: 'borrowed',
-                    borrowDate: { $lt: thresholdDate },
                   },
                 },
                 {
                   $project: {
-                    totalDaysOut: {
-                      $floor: {
+                    archivedFine: { $ifNull: ['$archivedFine', 0] },
+                    // FIX: Use $ceil to match your JS Math.ceil() logic
+                    diffDays: {
+                      $ceil: {
                         $divide: [
                           { $subtract: [new Date(), '$borrowDate'] },
                           1000 * 60 * 60 * 24,
@@ -492,19 +502,31 @@ async function run() {
                 },
                 {
                   $addFields: {
-                    fineAmount: {
+                    // Calculate Live Fine: (DiffDays - 14) * 10
+                    liveFine: {
                       $multiply: [
-                        { $max: [0, { $subtract: ['$totalDaysOut', 14] }] },
+                        { $max: [0, { $subtract: ['$diffDays', 14] }] },
                         10,
                       ],
                     },
                   },
                 },
                 {
+                  $project: {
+                    // Total = Archived + Live
+                    totalDebt: { $add: ['$archivedFine', '$liveFine'] },
+                  },
+                },
+                {
+                  $match: {
+                    totalDebt: { $gt: 0 },
+                  },
+                },
+                {
                   $group: {
                     _id: null,
-                    totalLibraryFines: { $sum: '$fineAmount' },
-                    averageFine: { $avg: '$fineAmount' },
+                    totalLibraryFines: { $sum: '$totalDebt' },
+                    averageFine: { $avg: '$totalDebt' },
                   },
                 },
               ])
@@ -513,6 +535,7 @@ async function run() {
             Promise.all([
               booksCollection.countDocuments(),
               usersCollection.countDocuments({ role: 'member' }),
+              borrowsCollection.countDocuments({ status: 'borrowed' }),
             ]),
           ]);
 
@@ -520,6 +543,7 @@ async function run() {
             summary: {
               totalBooks: totalCounts[0],
               totalMembers: totalCounts[1],
+              totalActiveBorrows: totalCounts[2],
               totalFinesPending: fineStats[0]?.totalLibraryFines || 0,
               averageFine: fineStats[0]?.averageFine || 0,
             },
@@ -632,6 +656,7 @@ async function run() {
         const record = await borrowsCollection.findOne({
           _id: new ObjectId(id),
         });
+
         if (!record || record.status !== 'borrowed') {
           return res.status(400).json({ message: 'Invalid renewal request.' });
         }
@@ -642,15 +667,15 @@ async function run() {
 
         if (!book || book.stock <= 2) {
           return res.status(400).json({
-            message:
-              'High demand! This book cannot be renewed. Please return it so others can read.',
+            message: 'High demand! This book cannot be renewed.',
           });
         }
 
         const borrowDate = new Date(record.borrowDate);
         const today = new Date();
-        const diffTime = Math.abs(today - borrowDate);
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const diffDays = Math.ceil(
+          Math.abs(today - borrowDate) / (1000 * 60 * 60 * 24),
+        );
 
         if (diffDays < 11) {
           return res.status(400).json({
@@ -659,10 +684,13 @@ async function run() {
           });
         }
 
-        let currentFine = 0;
+        let newPeriodFine = 0;
         if (diffDays > 14) {
-          currentFine = (diffDays - 14) * 10;
+          newPeriodFine = (diffDays - 14) * 10;
         }
+
+        const currentArchived = record.archivedFine || 0;
+        const newTotalFine = currentArchived + newPeriodFine;
 
         const updateDoc = {
           $set: {
@@ -670,9 +698,9 @@ async function run() {
             reminder12Sent: false,
             reminder13Sent: false,
             isRenewed: true,
-          },
-          $inc: {
-            unpaidFine: currentFine,
+
+            unpaidFine: newTotalFine,
+            archivedFine: newTotalFine,
           },
         };
 
@@ -680,7 +708,7 @@ async function run() {
 
         res.status(200).json({
           message: 'Renewed successfully!',
-          fineAdded: currentFine,
+          fine: newTotalFine,
         });
       } catch (error) {
         res.status(500).json({ error: error.message });
@@ -696,7 +724,6 @@ async function run() {
           req.user.role === 'member' &&
           req.user.userId !== userId.toString()
         ) {
-          console.log(req.user.role, req.user._id, req.user.id, userId);
           return res.status(403).json({ message: 'Access denied.' });
         }
 
@@ -739,45 +766,54 @@ async function run() {
           const { userId } = req.params;
           const today = new Date();
 
-          const activeBorrows = await borrowsCollection
+          const recordsWithFines = await borrowsCollection
             .find({
-              userId,
-              status: 'borrowed',
+              userId: userId,
+              unpaidFine: { $gt: 0 },
             })
             .toArray();
 
-          if (activeBorrows.length === 0) {
+          if (recordsWithFines.length === 0) {
             return res
               .status(404)
-              .json({ message: 'No active borrows found.' });
+              .json({ message: 'No unpaid fines found for this user.' });
           }
 
-          const bulkOps = activeBorrows.map((record) => {
-            const diffDays = Math.ceil(
-              Math.abs(today - new Date(record.borrowDate)) /
-                (1000 * 60 * 60 * 24),
-            );
-            const liveFine = diffDays > 14 ? (diffDays - 14) * 10 : 0;
-
-            return {
-              updateOne: {
-                filter: { _id: record._id },
-                update: {
-                  $set: {
-                    unpaidFine: 0,
-                    borrowDate: today,
-                    reminder12Sent: false,
-                    reminder13Sent: false,
+          const bulkOps = recordsWithFines.map((record) => {
+            if (record.status === 'borrowed') {
+              return {
+                updateOne: {
+                  filter: { _id: record._id },
+                  update: {
+                    $set: {
+                      unpaidFine: 0,
+                      archivedFine: 0, // <--- Clear the archive too!
+                      borrowDate: today,
+                      reminder12Sent: false,
+                      reminder13Sent: false,
+                    },
                   },
                 },
-              },
-            };
+              };
+            } else {
+              return {
+                updateOne: {
+                  filter: { _id: record._id },
+                  update: {
+                    $set: {
+                      unpaidFine: 0,
+                      archivedFine: 0,
+                    },
+                  },
+                },
+              };
+            }
           });
 
           const result = await borrowsCollection.bulkWrite(bulkOps);
 
           res.status(200).json({
-            message: `Fines cleared and clocks reset for ${result.modifiedCount} books.`,
+            message: `Fines cleared for ${result.modifiedCount} records (Active & Returned).`,
           });
         } catch (error) {
           res.status(500).json({ error: error.message });
@@ -793,34 +829,33 @@ async function run() {
       async (req, res) => {
         try {
           const today = new Date();
-
-          const overdueRecords = await borrowsCollection
-            .find({
-              status: 'borrowed',
-              borrowDate: {
-                $lt: new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000),
-              },
-            })
+          const records = await borrowsCollection
+            .find({ status: 'borrowed' })
             .toArray();
 
-          if (overdueRecords.length === 0) {
-            return res
-              .status(200)
-              .json({ message: 'No overdue records found to sync.' });
-          }
+          if (records.length === 0)
+            return res.status(200).json({ message: 'No records.' });
 
-          const bulkOps = overdueRecords.map((record) => {
+          const bulkOps = records.map((record) => {
             const borrowDate = new Date(record.borrowDate);
-            const diffTime = Math.abs(today - borrowDate);
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            const liveFine = (diffDays - 14) * 10;
+            const diffDays = Math.ceil(
+              Math.abs(today - borrowDate) / (1000 * 60 * 60 * 24),
+            );
+
+            let newLiveFine = 0;
+            if (diffDays > 14) {
+              newLiveFine = (diffDays - 14) * 10;
+            }
+
+            const historicDebt = record.archivedFine || 0;
+            const totalDebt = historicDebt + newLiveFine;
 
             return {
               updateOne: {
                 filter: { _id: record._id },
                 update: {
                   $set: {
-                    unpaidFine: liveFine,
+                    unpaidFine: totalDebt,
                     lastSyncedAt: today,
                   },
                 },
@@ -830,15 +865,11 @@ async function run() {
 
           const result = await borrowsCollection.bulkWrite(bulkOps);
 
-          res.status(200).json({
-            message: `Successfully synced ${result.modifiedCount} records.`,
-            details: result,
-          });
-        } catch (error) {
-          console.error('BulkWrite Error:', error);
           res
-            .status(500)
-            .json({ error: 'Sync failed', details: error.message });
+            .status(200)
+            .json({ message: 'Synced fines with archive support.' });
+        } catch (error) {
+          res.status(500).json({ error: error.message });
         }
       },
     );
@@ -873,6 +904,7 @@ async function run() {
               { $unwind: '$bookDetails' },
               {
                 $project: {
+                  _id: 1,
                   bookTitle: '$bookDetails.title',
                   bookImage: '$bookDetails.image',
                   borrowDate: 1,
@@ -885,16 +917,32 @@ async function run() {
           const today = new Date();
           let totalFine = 0;
 
-          activeBorrows.forEach((record) => {
-            totalFine += record.fine || 0;
+          const borrowsWithFine = activeBorrows.map((record) => {
+            // 1. Get the "Locked" debt from previous renewals
+            const historicDebt = record.archivedFine || 0;
 
+            // 2. Calculate "Live" fine for the CURRENT period
+            const today = new Date();
+            const borrowDate = new Date(record.borrowDate);
             const diffDays = Math.ceil(
-              Math.abs(today - new Date(record.borrowDate)) /
-                (1000 * 60 * 60 * 24),
+              Math.abs(today - borrowDate) / (1000 * 60 * 60 * 24),
             );
+
+            let currentPeriodFine = 0;
             if (diffDays > 14) {
-              totalFine += (diffDays - 14) * 10;
+              currentPeriodFine = (diffDays - 14) * 10;
             }
+
+            // 3. CORRECT LOGIC: Summation
+            // Total = Old Debt + New Debt
+            const actualFine = historicDebt + currentPeriodFine;
+
+            totalFine += actualFine;
+
+            return {
+              ...record,
+              fine: actualFine, // Send correct total to frontend
+            };
           });
 
           res.status(200).json({
@@ -902,7 +950,7 @@ async function run() {
             name: user.name,
             email: user.email,
             totalFine,
-            activeBorrows,
+            activeBorrows: borrowsWithFine,
           });
         } catch (error) {
           res.status(500).json({ error: error.message });

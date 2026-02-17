@@ -1,4 +1,4 @@
-import { useContext, useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import api from '../../api/axiosInstance';
 import { AuthContext } from '../../contexts/AuthContext';
@@ -16,19 +16,17 @@ const Register = () => {
 
   let navigate = useNavigate();
 
-  const { login } = useContext(AuthContext);
-
   const formHandler = async (e) => {
     e.preventDefault();
     setIsLoading(true);
     setError('');
     try {
-      const response = await api.post('/register', { name, email, password });
-      const { token, user: userData } = response.data;
-      login(userData, token);
-      console.log('Registration successful!');
-      navigate('/books');
+      await api.post('/register', { name, email, password });
+
+      alert('Registration successful! Please log in.');
+      navigate('/login');
     } catch (err) {
+      // This catches 409 (User already exists) or 500 errors
       setError(err.response?.data?.message || 'Something went wrong');
     } finally {
       setIsLoading(false);
@@ -37,10 +35,10 @@ const Register = () => {
 
   if (isLoading) {
     return (
-      <div class="flex flex-row gap-2 min-h-screen justify-center items-center mx-auto">
-        <div class="w-4 h-4 rounded-full bg-blue-700 animate-bounce"></div>
-        <div class="w-4 h-4 rounded-full bg-blue-700 animate-bounce [animation-delay:-.3s]"></div>
-        <div class="w-4 h-4 rounded-full bg-blue-700 animate-bounce [animation-delay:-.5s]"></div>
+      <div className="flex flex-row gap-2 min-h-screen justify-center items-center mx-auto">
+        <div className="w-4 h-4 rounded-full bg-blue-700 animate-bounce"></div>
+        <div className="w-4 h-4 rounded-full bg-blue-700 animate-bounce [animation-delay:-.3s]"></div>
+        <div className="w-4 h-4 rounded-full bg-blue-700 animate-bounce [animation-delay:-.5s]"></div>
       </div>
     );
   }
