@@ -267,80 +267,78 @@ async function run() {
       },
     );
 
-    // return a book
-    app.patch('/borrows/return/:id', verifyToken, async (req, res) => {
-      try {
-        const { id } = req.params;
+    // return a book (only librarian)
+    app.patch(
+      '/borrows/return/:id',
+      verifyToken,
+      verifyRole('librarian', 'owner'),
+      async (req, res) => {
+        try {
+          const { id } = req.params;
 
-        // 1. Find the borrow record
-        const record = await borrowsCollection.findOne({
-          _id: new ObjectId(id),
-        });
-        if (!record || record.status !== 'borrowed') {
-          return res
-            .status(400)
-            .json({ message: 'This book was already returned.' });
-        }
+          // 1. Find the borrow record
+          const record = await borrowsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!record || record.status !== 'borrowed') {
+            return res
+              .status(400)
+              .json({ message: 'This book was already returned.' });
+          }
 
-        // 2. Calculate any NEW fines accumulated since the last renewal/borrow
-        const lastDate = new Date(record.borrowDate);
-        const today = new Date();
-        const diffDays = Math.ceil(
-          Math.abs(today - lastDate) / (1000 * 60 * 60 * 24),
-        );
+          // 2. Calculate any NEW fines accumulated since the last renewal/borrow
+          const lastDate = new Date(record.borrowDate);
+          const today = new Date();
+          const diffDays = Math.ceil(
+            Math.abs(today - lastDate) / (1000 * 60 * 60 * 24),
+          );
 
-        let newFine = 0;
-        if (diffDays > 14) {
-          newFine = (diffDays - 14) * 10;
-        }
+          let newFine = 0;
+          if (diffDays > 14) {
+            newFine = (diffDays - 14) * 10;
+          }
 
-        const totalFinalFine = (record.unpaidFine || 0) + newFine;
+          const totalFinalFine = (record.unpaidFine || 0) + newFine;
 
-        // 3. Update the Borrow Record
-        await borrowsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: 'returned',
-              returnDate: new Date(),
-              totalFineAtReturn: totalFinalFine, // Record the total debt
+          // 3. Update the Borrow Record
+          await borrowsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                status: 'returned',
+                returnDate: new Date(),
+                totalFineAtReturn: totalFinalFine, // Record the total debt
+              },
             },
-          },
-        );
+          );
 
-        // 4. Increment the Book Stock
-        await booksCollection.updateOne(
-          { _id: new ObjectId(record.bookId) },
-          { $inc: { stock: 1 } },
-        );
+          // 4. Increment the Book Stock
+          await booksCollection.updateOne(
+            { _id: new ObjectId(record.bookId) },
+            { $inc: { stock: 1 } },
+          );
 
-        cache.del('cachedBooksDefault');
+          cache.del('cachedBooksDefault');
 
-        res.status(200).json({
-          message: 'Book returned successfully!',
-          totalFineToPay: totalFinalFine,
-        });
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
+          res.status(200).json({
+            message: 'Book returned successfully!',
+            totalFineToPay: totalFinalFine,
+          });
+        } catch (error) {
+          res.status(500).json({ error: error.message });
+        }
+      },
+    );
 
-    // get borrowed books
-    app.get('/my-borrows', verifyToken, async (req, res) => {
+    // user's borrow-return
+    app.get('/borrows', verifyToken, async (req, res) => {
       try {
         const userId = req.user.userId;
-        const cacheKey = `myBorrows_${userId}`;
-        const cachedData = cache.get(cacheKey);
-        if (cachedData) {
-          return res.status(200).json(cachedData);
-        }
-        const borrowedRecords = await borrowsCollection
+
+        const result = await borrowsCollection
           .aggregate([
             {
-              $match: {
-                userId: userId,
-                status: 'borrowed',
-              },
+              $match: { userId: userId },
             },
             {
               $lookup: {
@@ -350,67 +348,29 @@ async function run() {
                 as: 'bookDetails',
               },
             },
-            {
-              $unwind: {
-                path: '$bookDetails',
-              },
-            },
+            { $unwind: '$bookDetails' },
             {
               $project: {
                 _id: 1,
                 borrowDate: 1,
-                title: '$bookDetails.title',
-                author: '$bookDetails.author',
-                genre: '$bookDetails.genre',
+                returnDate: 1,
+                status: 1,
+                fine: '$unpaidFine',
+                bookTitle: '$bookDetails.title',
+                bookAuthor: '$bookDetails.author',
+                bookImage: '$bookDetails.image',
+                bookCategory: '$bookDetails.category',
               },
             },
-          ])
-          .toArray();
-        if (borrowedRecords.length === 0) {
-          return res.status(404).json({ message: 'No borrowed books!' });
-        }
-        cache.set(cacheKey, borrowedRecords, 600);
-        res.send(borrowedRecords);
-      } catch (error) {
-        res
-          .status(500)
-          .json({ message: 'Failed to load!', error: error.message });
-      }
-    });
-
-    // borrow-return history
-    app.get('/my-history', verifyToken, async (req, res) => {
-      try {
-        const userId = req.user.userId;
-        const cacheKey = `myHistory_${userId}`;
-        const cachedData = cache.get(cacheKey);
-        if (cachedData) {
-          return res.status(200).json(cachedData);
-        }
-
-        const records = await borrowsCollection
-          .aggregate([
-            {
-              $match: { userId: userId },
-            },
-            {
-              $project: {
-                _id: 0,
-                userId: 0,
-              },
-            },
+            { $sort: { borrowDate: -1 } },
           ])
           .toArray();
 
-        if (records.length === 0) {
-          return res.status(404).json({ message: 'No history found!' });
-        }
-        cache.set(cacheKey, records, 600);
-        res.send(records);
+        res.send(result);
       } catch (error) {
         res
           .status(500)
-          .json({ message: 'Failed to load!', error: error.message });
+          .json({ message: 'Error fetching borrows', error: error.message });
       }
     });
 
@@ -691,6 +651,13 @@ async function run() {
         const today = new Date();
         const diffTime = Math.abs(today - borrowDate);
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        if (diffDays < 11) {
+          return res.status(400).json({
+            message:
+              'Too early! You can only renew 3 days before the due date.',
+          });
+        }
 
         let currentFine = 0;
         if (diffDays > 14) {
